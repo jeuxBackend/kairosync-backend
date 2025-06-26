@@ -98,6 +98,25 @@ const createEvent = async (req, res) => {
       }
     }
 
+    // VALIDATE ALL USER IDs EXIST BEFORE CREATING INVITATIONS
+    if (inviteUserIdsToProcess.length > 0) {
+      const existingUsers = await User.findAll({
+        where: { id: inviteUserIdsToProcess },
+        attributes: ['id']
+      });
+      
+      const existingUserIds = existingUsers.map(user => user.id);
+      const invalidUserIds = inviteUserIdsToProcess.filter(id => !existingUserIds.includes(id));
+      
+      // Log warning for invalid users but continue with valid ones
+      if (invalidUserIds.length > 0) {
+        console.warn(`Warning: Invalid user IDs found and skipped: ${invalidUserIds.join(', ')}`);
+      }
+      
+      // Filter to only valid user IDs (extra safety)
+      inviteUserIdsToProcess = existingUserIds;
+    }
+
     if (
       visibility !== "private" &&
       validatedCapacity &&

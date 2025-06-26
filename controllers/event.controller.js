@@ -13,7 +13,6 @@ const {
 } = require("../models/index");
 const { structureComments } = require("../utils/structureComment");
 
-// Event Management
 const createEvent =  async (req, res) => {
   try {
     const {
@@ -23,7 +22,6 @@ const createEvent =  async (req, res) => {
     const userId = req.user.userId;
     const baseUrl = process.env.BASE_URL || "http://localhost:5000";
 
-    // Early validations
     let validatedCapacity = null;
     if (visibility !== "private" && capacity !== null && capacity !== undefined) {
       const capacityNum = Number(capacity);
@@ -38,15 +36,13 @@ const createEvent =  async (req, res) => {
 
     const coverPic = req.file ? `${baseUrl}/uploads/events/${req.file.filename}` : null;
 
-    // Optimize user ID collection with single query approach
     let allInviteUserIds = [...inviteUserIds];
     
     if (templateId) {
-      // Get template users more efficiently
       const templateUsers = await User.findAll({
         include: [{
           model: InviteeTemplate,
-          as: 'inviteeTemplates', // Adjust based on your association
+          as: 'inviteeTemplates', 
           where: { id: templateId, userId },
           attributes: []
         }],
@@ -58,7 +54,6 @@ const createEvent =  async (req, res) => {
       allInviteUserIds = [...new Set([...allInviteUserIds, ...templateUserIds])];
     }
 
-    // Early capacity check
     if (visibility !== "private" && validatedCapacity && allInviteUserIds.length > validatedCapacity) {
       return res.status(400).json({
         success: false,
@@ -66,9 +61,7 @@ const createEvent =  async (req, res) => {
       });
     }
 
-    // Single transaction with minimal queries
     const result = await sequelize.transaction(async (t) => {
-      // Create event
       const event = await Event.create({
         name, location, lat, lng, coverPic,
         visibility: visibility || "public",
@@ -77,9 +70,7 @@ const createEvent =  async (req, res) => {
         createdBy: userId,
       }, { transaction: t });
 
-      // Handle invitations efficiently
       if (allInviteUserIds.length > 0) {
-        // Validate and create invitations in one go
         const validUserIds = await User.findAll({
           where: { id: allInviteUserIds },
           attributes: ['id'],
@@ -103,14 +94,12 @@ const createEvent =  async (req, res) => {
       return event;
     });
 
-    // Return minimal response for speed (fetch full details only if needed)
     res.status(201).json({
       success: true,
       message: "Event created successfully",
       data: {
         id: result.id,
         name: result.name,
-        // Add other essential fields as needed
       }
     });
 
@@ -128,7 +117,7 @@ const getEvents = async (req, res) => {
   try {
     const userId = req.user.userId;
     const {
-      type = "public", // public, hosted, invited, upcoming, all
+      type = "public",
       page = 1,
       limit = 10,
       search,
@@ -698,13 +687,11 @@ const updateEvent = async (req, res) => {
     const userId = req.user.userId;
     const updateData = { ...req.body };
 
-    // Handle cover picture upload
     if (req.file) {
       const baseUrl = process.env.BASE_URL || "http://localhost:5000";
       updateData.coverPic = `${baseUrl}/uploads/events/${req.file.filename}`;
     }
 
-    // Find and authorize event in one query
     const event = await Event.findOne({
       where: { id: eventId, createdBy: userId },
     });
@@ -716,7 +703,6 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    // Handle capacity and visibility logic
     const finalVisibility = updateData.visibility || event.visibility;
     
     if (finalVisibility === "private") {
@@ -731,7 +717,6 @@ const updateEvent = async (req, res) => {
       }
       updateData.capacity = capacityValidation.value;
 
-      // Check capacity against confirmed attendees
       const confirmedCount = await EventInvite.count({
         where: { eventId, status: "accepted" },
       });
@@ -744,7 +729,6 @@ const updateEvent = async (req, res) => {
       }
     }
 
-    // Update and fetch in parallel for better performance
     const [, updatedEvent] = await Promise.all([
       event.update(updateData),
       Event.findByPk(eventId, {
@@ -771,7 +755,6 @@ const updateEvent = async (req, res) => {
   }
 };
 
-// Helper function for capacity validation
 const validateCapacity = (capacity) => {
   if (capacity === null || capacity === undefined) {
     return { isValid: true, value: null };
@@ -821,7 +804,6 @@ const deleteEvent = async (req, res) => {
   }
 };
 
-// Event Invitation Management
 const inviteUsers = async (req, res) => {
   try {
     const { eventId } = req.params;

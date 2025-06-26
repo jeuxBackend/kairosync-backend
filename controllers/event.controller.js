@@ -1,4 +1,5 @@
 const { Op, literal, fn, col } = require("sequelize");
+const sequelize = require("../config/database");
 const {
   Event,
   EventInvite,

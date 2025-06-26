@@ -60,7 +60,7 @@ const requireCompleteProfile = async (req, res, next) => {
   try {
     const user = await User.findByPk(req.user.userId);
     
-    const isComplete = !!(user.name && user.userName && user.dateOfBirth && user.gender);
+    const isComplete = !!(user.name && user.dateOfBirth && user.gender);
     
     if (!isComplete) {
       return res.status(400).json({

@@ -13,146 +13,106 @@ const {
 const { structureComments } = require("../utils/structureComment");
 
 // Event Management
-const createEvent = async (req, res) => {
+const createEvent =  async (req, res) => {
   try {
     const {
-      name,
-      location,
-      lat,
-      lng,
-      visibility,
-      capacity,
-      additionalNotes,
-      startDate,
-      endDate,
-      startTime,
-      endTime,
-      inviteUserIds = [],
-      templateId,
+      name, location, lat, lng, visibility, capacity, additionalNotes,
+      startDate, endDate, startTime, endTime, inviteUserIds = [], templateId,
     } = req.body;
     const userId = req.user.userId;
     const baseUrl = process.env.BASE_URL || "http://localhost:5000";
 
+    // Early validations
     let validatedCapacity = null;
-
-    if (visibility === "private") {
-      validatedCapacity = null;
-    } else if (capacity !== null && capacity !== undefined) {
+    if (visibility !== "private" && capacity !== null && capacity !== undefined) {
       const capacityNum = Number(capacity);
-
-      if (
-        isNaN(capacityNum) ||
-        !Number.isInteger(capacityNum) ||
-        capacityNum < 1
-      ) {
+      if (isNaN(capacityNum) || !Number.isInteger(capacityNum) || capacityNum < 1) {
         return res.status(400).json({
           success: false,
-          message:
-            "Capacity must be null (unlimited) or a positive integer (1, 2, 3, etc.)",
+          message: "Capacity must be null (unlimited) or a positive integer (1, 2, 3, etc.)",
         });
       }
-
       validatedCapacity = capacityNum;
     }
 
-    let coverPic = null;
-    if (req.file) {
-      coverPic = `${baseUrl}/uploads/events/${req.file.filename}`;
-    }
+    const coverPic = req.file ? `${baseUrl}/uploads/events/${req.file.filename}` : null;
 
-    const event = await Event.create({
-      name,
-      location,
-      lat,
-      lng,
-      coverPic,
-      visibility: visibility || "public",
-      capacity: validatedCapacity,
-      additionalNotes,
-      startDate,
-      endDate,
-      startTime,
-      endTime,
-      createdBy: userId,
-    });
-
-    let inviteUserIdsToProcess = [...inviteUserIds];
-
+    // Optimize user ID collection with single query approach
+    let allInviteUserIds = [...inviteUserIds];
+    
     if (templateId) {
-      const template = await InviteeTemplate.findOne({
-        where: { id: templateId, userId },
-        include: [
-          {
-            model: User,
-            as: "users",
-            attributes: ["id"],
-          },
-        ],
-      });
-
-      if (template) {
-        const templateUserIds = template.users.map((user) => user.id);
-        inviteUserIdsToProcess = [
-          ...new Set([...inviteUserIdsToProcess, ...templateUserIds]),
-        ];
-      }
-    }
-
-    // VALIDATE ALL USER IDs EXIST BEFORE CREATING INVITATIONS
-    if (inviteUserIdsToProcess.length > 0) {
-      const existingUsers = await User.findAll({
-        where: { id: inviteUserIdsToProcess },
-        attributes: ['id']
+      // Get template users more efficiently
+      const templateUsers = await User.findAll({
+        include: [{
+          model: InviteeTemplate,
+          as: 'inviteeTemplates', // Adjust based on your association
+          where: { id: templateId, userId },
+          attributes: []
+        }],
+        attributes: ['id'],
+        raw: true
       });
       
-      const existingUserIds = existingUsers.map(user => user.id);
-      const invalidUserIds = inviteUserIdsToProcess.filter(id => !existingUserIds.includes(id));
-      
-      // Log warning for invalid users but continue with valid ones
-      if (invalidUserIds.length > 0) {
-        console.warn(`Warning: Invalid user IDs found and skipped: ${invalidUserIds.join(', ')}`);
-      }
-      
-      // Filter to only valid user IDs (extra safety)
-      inviteUserIdsToProcess = existingUserIds;
+      const templateUserIds = templateUsers.map(user => user.id);
+      allInviteUserIds = [...new Set([...allInviteUserIds, ...templateUserIds])];
     }
 
-    if (
-      visibility !== "private" &&
-      validatedCapacity &&
-      inviteUserIdsToProcess.length > validatedCapacity
-    ) {
+    // Early capacity check
+    if (visibility !== "private" && validatedCapacity && allInviteUserIds.length > validatedCapacity) {
       return res.status(400).json({
         success: false,
-        message: `Cannot invite ${inviteUserIdsToProcess.length} users. Event capacity is limited to ${validatedCapacity}.`,
+        message: `Cannot invite ${allInviteUserIds.length} users. Event capacity is limited to ${validatedCapacity}.`,
       });
     }
 
-    if (visibility === "private" || inviteUserIdsToProcess.length > 0) {
-      const invitations = inviteUserIdsToProcess.map((inviteUserId) => ({
-        eventId: event.id,
-        userId: inviteUserId,
-        status: "pending",
-        joinedManually: false,
-      }));
-      await EventInvite.bulkCreate(invitations);
-    }
+    // Single transaction with minimal queries
+    const result = await sequelize.transaction(async (t) => {
+      // Create event
+      const event = await Event.create({
+        name, location, lat, lng, coverPic,
+        visibility: visibility || "public",
+        capacity: validatedCapacity,
+        additionalNotes, startDate, endDate, startTime, endTime,
+        createdBy: userId,
+      }, { transaction: t });
 
-    const createdEvent = await Event.findByPk(event.id, {
-      include: [
-        {
-          model: User,
-          as: "creator",
-          attributes: ["id", "name", "phoneNumber", "profilePicture"],
-        },
-      ],
+      // Handle invitations efficiently
+      if (allInviteUserIds.length > 0) {
+        // Validate and create invitations in one go
+        const validUserIds = await User.findAll({
+          where: { id: allInviteUserIds },
+          attributes: ['id'],
+          raw: true,
+          transaction: t
+        }).then(users => users.map(u => u.id));
+
+        if (validUserIds.length > 0) {
+          await EventInvite.bulkCreate(
+            validUserIds.map(userId => ({
+              eventId: event.id,
+              userId,
+              status: "pending",
+              joinedManually: false,
+            })),
+            { transaction: t, ignoreDuplicates: true }
+          );
+        }
+      }
+
+      return event;
     });
 
+    // Return minimal response for speed (fetch full details only if needed)
     res.status(201).json({
       success: true,
       message: "Event created successfully",
-      data: createdEvent,
+      data: {
+        id: result.id,
+        name: result.name,
+        // Add other essential fields as needed
+      }
     });
+
   } catch (error) {
     console.error("Create event error:", error);
     res.status(500).json({
@@ -737,12 +697,13 @@ const updateEvent = async (req, res) => {
     const userId = req.user.userId;
     const updateData = { ...req.body };
 
-    const baseUrl = process.env.BASE_URL || "http://localhost:5000";
-
+    // Handle cover picture upload
     if (req.file) {
+      const baseUrl = process.env.BASE_URL || "http://localhost:5000";
       updateData.coverPic = `${baseUrl}/uploads/events/${req.file.filename}`;
     }
 
+    // Find and authorize event in one query
     const event = await Event.findOne({
       where: { id: eventId, createdBy: userId },
     });
@@ -754,68 +715,45 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    if ("capacity" in updateData) {
-      const visibility = updateData.visibility || event.visibility;
-
-      if (visibility === "private") {
-        updateData.capacity = null;
-      } else if (
-        updateData.capacity !== null &&
-        updateData.capacity !== undefined
-      ) {
-        const capacityNum = Number(updateData.capacity);
-
-        if (
-          isNaN(capacityNum) ||
-          !Number.isInteger(capacityNum) ||
-          capacityNum < 1
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "Capacity must be null (unlimited) or a positive integer (1, 2, 3, etc.)",
-          });
-        }
-
-        updateData.capacity = capacityNum;
-      }
-    }
-
-    if ("visibility" in updateData && updateData.visibility === "private") {
+    // Handle capacity and visibility logic
+    const finalVisibility = updateData.visibility || event.visibility;
+    
+    if (finalVisibility === "private") {
       updateData.capacity = null;
-    }
-
-    if (
-      "capacity" in updateData &&
-      updateData.capacity &&
-      updateData.visibility !== "private"
-    ) {
-      const confirmedAttendeesCount = await EventInvite.count({
-        where: {
-          eventId: eventId,
-          status: "accepted",
-        },
-      });
-
-      if (confirmedAttendeesCount > updateData.capacity) {
+    } else if ("capacity" in updateData && updateData.capacity !== null) {
+      const capacityValidation = validateCapacity(updateData.capacity);
+      if (!capacityValidation.isValid) {
         return res.status(400).json({
           success: false,
-          message: `Cannot set capacity to ${updateData.capacity}. There are already ${confirmedAttendeesCount} confirmed attendees.`,
+          message: capacityValidation.message,
+        });
+      }
+      updateData.capacity = capacityValidation.value;
+
+      // Check capacity against confirmed attendees
+      const confirmedCount = await EventInvite.count({
+        where: { eventId, status: "accepted" },
+      });
+
+      if (confirmedCount > updateData.capacity) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot set capacity to ${updateData.capacity}. There are already ${confirmedCount} confirmed attendees.`,
         });
       }
     }
 
-    await event.update(updateData);
-
-    const updatedEvent = await Event.findByPk(eventId, {
-      include: [
-        {
+    // Update and fetch in parallel for better performance
+    const [, updatedEvent] = await Promise.all([
+      event.update(updateData),
+      Event.findByPk(eventId, {
+        include: [{
           model: User,
           as: "creator",
           attributes: ["id", "name", "phoneNumber", "profilePicture"],
-        },
-      ],
-    });
+        }],
+      }),
+    ]);
 
     res.json({
       success: true,
@@ -830,6 +768,24 @@ const updateEvent = async (req, res) => {
       error: error.message,
     });
   }
+};
+
+// Helper function for capacity validation
+const validateCapacity = (capacity) => {
+  if (capacity === null || capacity === undefined) {
+    return { isValid: true, value: null };
+  }
+
+  const capacityNum = Number(capacity);
+  
+  if (isNaN(capacityNum) || !Number.isInteger(capacityNum) || capacityNum < 1) {
+    return {
+      isValid: false,
+      message: "Capacity must be null (unlimited) or a positive integer (1, 2, 3, etc.)",
+    };
+  }
+
+  return { isValid: true, value: capacityNum };
 };
 
 const deleteEvent = async (req, res) => {

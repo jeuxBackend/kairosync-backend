@@ -47,7 +47,7 @@ app.use('/api/', limiter);
 app.use(compression());
 
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
+  origin: "*",
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
   credentials: true,
   optionsSuccessStatus: 200
@@ -55,12 +55,12 @@ app.use(cors({
 
 
 app.use(bodyParser.json({ 
-  limit: '10mb',
+  limit: '50mb',
   type: 'application/json'
 }));
 app.use(bodyParser.urlencoded({ 
   extended: true,
-  limit: '10mb'
+  limit: '50mb'
 }));
 
 
@@ -68,6 +68,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
   maxAge: '1d',
   etag: true
 }));
+app.use(express.static('views'));
 
 
 app.use('/api-docs', swaggerUi.serve);
@@ -91,19 +92,7 @@ app.use('/api/', eventRoutes);
 
 
 app.get('/', (req, res) => {
-  res.status(200).json({
-    application: 'Kairo Sync',
-    description: 'Professional Event Management System',
-    version: '1.0.0',
-    status: 'operational',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      documentation: '/api-docs',
-      health: '/health',
-      auth: '/api/',
-      events: '/api/events'
-    }
-  });
+  res.sendFile(path.join(__dirname, 'views', '/index.html'));
 });
 
 app.get('/health', (req, res) => {

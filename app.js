@@ -68,7 +68,6 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
   maxAge: '1d',
   etag: true
 }));
-app.use(express.static('views'));
 
 
 app.use('/api-docs', swaggerUi.serve);
@@ -92,7 +91,19 @@ app.use('/api/', eventRoutes);
 
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', '/index.html'));
+  res.status(200).json({
+    application: 'Kairo Sync',
+    description: 'Professional Event Management System',
+    version: '1.0.0',
+    status: 'operational',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      documentation: '/api-docs',
+      health: '/health',
+      auth: '/api/',
+      events: '/api/events'
+    }
+  });
 });
 
 app.get('/health', (req, res) => {

@@ -12,8 +12,9 @@ const {
   EventSeen,
 } = require("../models/index");
 const { structureComments } = require("../utils/structureComment");
+const { parseDate } = require("../utils/DateParser");
 
-const createEvent =  async (req, res) => {
+const createEvent = async (req, res) => {
   try {
     const {
       name, location, lat, lng, visibility, capacity, additionalNotes,
@@ -21,6 +22,64 @@ const createEvent =  async (req, res) => {
     } = req.body;
     const userId = req.user.userId;
     const baseUrl = process.env.BASE_URL || "http://localhost:5000";
+
+    if (!name || !startDate || !endDate || !startTime || !endTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, start date, end date, start time, and end time are required",
+      });
+    }
+
+    let validatedStartDate, validatedEndDate;
+    try {
+      validatedStartDate = parseDate(startDate, { 
+        outputFormat: 'yyyy-mm-dd',
+        validateAge: false 
+      });
+      validatedEndDate = parseDate(endDate, { 
+        outputFormat: 'yyyy-mm-dd',
+        validateAge: false 
+      });
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid date format: ${error.message}`,
+      });
+    }
+
+    const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
+    if (!timeRegex.test(startTime)) {
+      return res.status(400).json({
+        success: false,
+        message: "Start time must be in HH:MM or HH:MM:SS format",
+      });
+    }
+    if (!timeRegex.test(endTime)) {
+      return res.status(400).json({
+        success: false,
+        message: "End time must be in HH:MM or HH:MM:SS format",
+      });
+    }
+
+    const startDateTime = new Date(`${validatedStartDate}T${startTime}`);
+    const endDateTime = new Date(`${validatedEndDate}T${endTime}`);
+    const currentDateTime = new Date();
+
+    if (startDateTime < currentDateTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Event start date and time cannot be in the past",
+      });
+    }
+
+    if (endDateTime <= startDateTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Event end date and time must be after start date and time",
+      });
+    }
+
+    
 
     let validatedCapacity = null;
     if (visibility !== "private" && capacity !== null && capacity !== undefined) {
@@ -39,19 +98,26 @@ const createEvent =  async (req, res) => {
     let allInviteUserIds = [...inviteUserIds];
     
     if (templateId) {
-      const templateUsers = await User.findAll({
-        include: [{
-          model: InviteeTemplate,
-          as: 'inviteeTemplates', 
-          where: { id: templateId, userId },
-          attributes: []
-        }],
-        attributes: ['id'],
-        raw: true
-      });
-      
-      const templateUserIds = templateUsers.map(user => user.id);
-      allInviteUserIds = [...new Set([...allInviteUserIds, ...templateUserIds])];
+      try {
+        const templateUsers = await User.findAll({
+          include: [{
+            model: InviteeTemplate,
+            as: 'inviteeTemplates', 
+            where: { id: templateId, userId },
+            attributes: []
+          }],
+          attributes: ['id'],
+          raw: true
+        });
+        
+        const templateUserIds = templateUsers.map(user => user.id);
+        allInviteUserIds = [...new Set([...allInviteUserIds, ...templateUserIds])];
+      } catch (templateError) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid template ID or template not found",
+        });
+      }
     }
 
     if (visibility !== "private" && validatedCapacity && allInviteUserIds.length > validatedCapacity) {
@@ -63,10 +129,18 @@ const createEvent =  async (req, res) => {
 
     const result = await sequelize.transaction(async (t) => {
       const event = await Event.create({
-        name, location, lat, lng, coverPic,
+        name, 
+        location, 
+        lat, 
+        lng, 
+        coverPic,
         visibility: visibility || "public",
         capacity: validatedCapacity,
-        additionalNotes, startDate, endDate, startTime, endTime,
+        additionalNotes, 
+        startDate: validatedStartDate,  
+        endDate: validatedEndDate,      
+        startTime, 
+        endTime,
         createdBy: userId,
       }, { transaction: t });
 
@@ -89,6 +163,10 @@ const createEvent =  async (req, res) => {
             { transaction: t, ignoreDuplicates: true }
           );
         }
+
+        if (validUserIds.length !== allInviteUserIds.length) {
+          console.warn(`Some invited users were not found. Requested: ${allInviteUserIds.length}, Found: ${validUserIds.length}`);
+        }
       }
 
       return event;
@@ -100,15 +178,34 @@ const createEvent =  async (req, res) => {
       data: {
         id: result.id,
         name: result.name,
+        startDate: result.startDate,
+        endDate: result.endDate,
+        startTime: result.startTime,
+        endTime: result.endTime,
       }
     });
 
   } catch (error) {
     console.error("Create event error:", error);
+    
+    if (req.file) {
+      setImmediate(() => {
+        try {
+          const filePath = path.join(__dirname, "../uploads/events/", req.file.filename);
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log("Event cover picture cleaned up after error");
+          }
+        } catch (cleanupError) {
+          console.warn("Failed to cleanup uploaded file:", cleanupError);
+        }
+      });
+    }
+    
     res.status(500).json({
       success: false,
       message: "Failed to create event",
-      error: error.message,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 };
@@ -681,16 +778,15 @@ const getEventById = async (req, res) => {
   }
 };
 
+
 const updateEvent = async (req, res) => {
   try {
     const { eventId } = req.params;
     const userId = req.user.userId;
-    const updateData = { ...req.body };
-
-    if (req.file) {
-      const baseUrl = process.env.BASE_URL || "http://localhost:5000";
-      updateData.coverPic = `${baseUrl}/uploads/events/${req.file.filename}`;
-    }
+    const {
+      name, location, lat, lng, visibility, capacity, additionalNotes,
+      startDate, endDate, startTime, endTime, ...otherData
+    } = req.body;
 
     const event = await Event.findOne({
       where: { id: eventId, createdBy: userId },
@@ -703,12 +799,110 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    const finalVisibility = updateData.visibility || event.visibility;
+    const updateData = { ...otherData };
+
+    if (name !== undefined) updateData.name = name;
+    if (location !== undefined) updateData.location = location;
+    if (lat !== undefined) updateData.lat = lat;
+    if (lng !== undefined) updateData.lng = lng;
+    if (additionalNotes !== undefined) updateData.additionalNotes = additionalNotes;
+
+    if (req.file) {
+      const baseUrl = process.env.BASE_URL || "http://localhost:5000";
+      updateData.coverPic = `${baseUrl}/uploads/events/${req.file.filename}`;
+    }
+
+    let validatedStartDate = null;
+    let validatedEndDate = null;
+
+    if (startDate !== undefined) {
+      try {
+        validatedStartDate = parseDate(startDate, { 
+          outputFormat: 'yyyy-mm-dd',
+          validateAge: false 
+        });
+        updateData.startDate = validatedStartDate;
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid start date format: ${error.message}`,
+        });
+      }
+    }
+
+    if (endDate !== undefined) {
+      try {
+        validatedEndDate = parseDate(endDate, { 
+          outputFormat: 'yyyy-mm-dd',
+          validateAge: false 
+        });
+        updateData.endDate = validatedEndDate;
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid end date format: ${error.message}`,
+        });
+      }
+    }
+
+    const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
     
+    if (startTime !== undefined) {
+      if (!timeRegex.test(startTime)) {
+        return res.status(400).json({
+          success: false,
+          message: "Start time must be in HH:MM or HH:MM:SS format",
+        });
+      }
+      updateData.startTime = startTime;
+    }
+
+    if (endTime !== undefined) {
+      if (!timeRegex.test(endTime)) {
+        return res.status(400).json({
+          success: false,
+          message: "End time must be in HH:MM or HH:MM:SS format",
+        });
+      }
+      updateData.endTime = endTime;
+    }
+
+    const finalStartDate = validatedStartDate || event.startDate;
+    const finalEndDate = validatedEndDate || event.endDate;
+    const finalStartTime = startTime !== undefined ? startTime : event.startTime;
+    const finalEndTime = endTime !== undefined ? endTime : event.endTime;
+
+    if (finalStartDate && finalEndDate && finalStartTime && finalEndTime) {
+      const startDateTime = new Date(`${finalStartDate}T${finalStartTime}`);
+      const endDateTime = new Date(`${finalEndDate}T${finalEndTime}`);
+      const currentDateTime = new Date();
+
+      if ((startDate !== undefined || startTime !== undefined) && startDateTime < currentDateTime) {
+        return res.status(400).json({
+          success: false,
+          message: "Event start date and time cannot be in the past",
+        });
+      }
+
+      if (endDateTime <= startDateTime) {
+        return res.status(400).json({
+          success: false,
+          message: "Event end date and time must be after start date and time",
+        });
+      }
+
+     
+    }
+    const finalVisibility = visibility !== undefined ? visibility : event.visibility;
+    
+    if (visibility !== undefined) {
+      updateData.visibility = visibility;
+    }
+
     if (finalVisibility === "private") {
       updateData.capacity = null;
-    } else if ("capacity" in updateData && updateData.capacity !== null) {
-      const capacityValidation = validateCapacity(updateData.capacity);
+    } else if (capacity !== undefined && capacity !== null) {
+      const capacityValidation = validateCapacity(capacity);
       if (!capacityValidation.isValid) {
         return res.status(400).json({
           success: false,
@@ -727,7 +921,11 @@ const updateEvent = async (req, res) => {
           message: `Cannot set capacity to ${updateData.capacity}. There are already ${confirmedCount} confirmed attendees.`,
         });
       }
+    } else if (capacity !== undefined) {
+      updateData.capacity = capacity; 
     }
+
+    const oldCoverPic = event.coverPic;
 
     const [, updatedEvent] = await Promise.all([
       event.update(updateData),
@@ -740,21 +938,55 @@ const updateEvent = async (req, res) => {
       }),
     ]);
 
+    if (req.file && oldCoverPic && oldCoverPic !== updateData.coverPic) {
+      setImmediate(() => {
+        try {
+          const baseUrl = process.env.BASE_URL || "http://localhost:5000";
+          const oldFilePath = path.join(
+            __dirname,
+            "../",
+            oldCoverPic.replace(baseUrl, "")
+          );
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+            console.log("Old event cover picture deleted successfully");
+          }
+        } catch (fileError) {
+          console.warn("Failed to delete old event cover picture:", fileError);
+        }
+      });
+    }
+
     res.json({
       success: true,
       message: "Event updated successfully",
       data: updatedEvent,
     });
+
   } catch (error) {
     console.error("Update event error:", error);
+    
+    if (req.file) {
+      setImmediate(() => {
+        try {
+          const filePath = path.join(__dirname, "../uploads/events/", req.file.filename);
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log("Event cover picture cleaned up after error");
+          }
+        } catch (cleanupError) {
+          console.warn("Failed to cleanup uploaded file:", cleanupError);
+        }
+      });
+    }
+    
     res.status(500).json({
       success: false,
       message: "Failed to update event",
-      error: error.message,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 };
-
 const validateCapacity = (capacity) => {
   if (capacity === null || capacity === undefined) {
     return { isValid: true, value: null };

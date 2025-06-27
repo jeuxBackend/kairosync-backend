@@ -15,6 +15,7 @@ const {
 const path = require("path");
 const fs = require("fs");
 const { countryCodeMappings } = require("../utils/CountryCodeMapping");
+const { parseDateOfBirth } = require("../utils/DateParser");
 
 const generateOTP = () => {
   return Math.floor(1000 + Math.random() * 9000).toString();
@@ -217,7 +218,6 @@ const completeProfile = async (req, res) => {
     const { name, dateOfBirth, gender } = req.body;
     const userId = req.user.userId;
 
-    // Early validation
     if (!name || !dateOfBirth || !gender) {
       return res.status(400).json({
         success: false,
@@ -225,22 +225,34 @@ const completeProfile = async (req, res) => {
       });
     }
 
-    // Pre-calculate profile picture URL to avoid conditional logic later
+    let validatedDateOfBirth;
+    try {
+      validatedDateOfBirth = parseDateOfBirth(dateOfBirth);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     const baseUrl = process.env.BASE_URL || "http://localhost:5000";
     const newProfilePicture = req.file 
       ? `${baseUrl}/uploads/profile-pictures/${req.file.filename}` 
       : undefined;
 
-    // Prepare update data once
-    const updateData = { name, dateOfBirth, gender };
+    const updateData = { 
+      name, 
+      dateOfBirth: validatedDateOfBirth, 
+      gender 
+    };
+    
     if (newProfilePicture) {
       updateData.profilePicture = newProfilePicture;
     }
 
-    // Single optimized database operation
     const [updatedRows] = await User.update(updateData, {
       where: { id: userId },
-      returning: true // PostgreSQL only - for other DBs, you'll need a separate select
+      returning: true
     });
 
     if (updatedRows === 0) {
@@ -250,10 +262,8 @@ const completeProfile = async (req, res) => {
       });
     }
 
-    // Fetch updated user data (if returning isn't supported)
     const user = await User.findByPk(userId);
 
-    // Return response with minimal data reshaping
     res.status(200).json({
       success: true,
       message: "Profile completed successfully",
@@ -275,6 +285,7 @@ const completeProfile = async (req, res) => {
     });
   }
 };
+
 
 // GET PROFILE API
 const getProfile = async (req, res) => {
@@ -488,19 +499,26 @@ const updateProfile = async (req, res) => {
     const userId = req.user.userId;
     const { name, dateOfBirth, gender } = req.body;
 
+    let validatedDateOfBirth;
+    if (dateOfBirth) {
+      try {
+        validatedDateOfBirth = parseDateOfBirth(dateOfBirth);
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    }
+
     const updateData = {
       ...(name && { name }),
-      ...(dateOfBirth && { dateOfBirth }),
+      ...(validatedDateOfBirth && { dateOfBirth: validatedDateOfBirth }),
       ...(gender && { gender })
     };
 
     const baseUrl = process.env.BASE_URL || "http://localhost:5000";
     
-    let oldProfilePicture = null;
-    if (req.file) {
-      updateData.profilePicture = `${baseUrl}/uploads/profile-pictures/${req.file.filename}`;
-    }
-
     let oldProfilePicturePath = null;
     if (req.file) {
       const currentUser = await User.findByPk(userId, {
@@ -515,13 +533,21 @@ const updateProfile = async (req, res) => {
       }
       
       oldProfilePicturePath = currentUser.profilePicture;
+      updateData.profilePicture = `${baseUrl}/uploads/profile-pictures/${req.file.filename}`;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid fields provided for update",
+      });
     }
 
     const [updatedRows] = await User.update(updateData, {
       where: { id: userId }
     });
 
-    if (updatedRows === 0 && !req.file) {
+    if (updatedRows === 0) {
       return res.status(404).json({
         success: false,
         message: "User not found",
@@ -542,6 +568,7 @@ const updateProfile = async (req, res) => {
           );
           if (fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
+            console.log("Old profile picture deleted successfully");
           }
         } catch (fileError) {
           console.warn("Failed to delete old profile picture:", fileError);
@@ -564,6 +591,21 @@ const updateProfile = async (req, res) => {
     });
   } catch (error) {
     console.error("Update profile error:", error);
+    
+    if (req.file) {
+      setImmediate(() => {
+        try {
+          const filePath = path.join(__dirname, "../uploads/profile-pictures/", req.file.filename);
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log("Uploaded file cleaned up after error");
+          }
+        } catch (cleanupError) {
+          console.warn("Failed to cleanup uploaded file:", cleanupError);
+        }
+      });
+    }
+    
     res.status(500).json({
       success: false,
       message: "Internal server error",

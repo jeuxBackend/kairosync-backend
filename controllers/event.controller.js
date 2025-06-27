@@ -1047,7 +1047,7 @@ const inviteUsers = async (req, res) => {
     const event = await Event.findOne({
       where: { id: eventId, createdBy: userId },
     });
-
+    
     if (!event) {
       return res.status(404).json({
         success: false,
@@ -1055,15 +1055,31 @@ const inviteUsers = async (req, res) => {
       });
     }
 
+    const validUsers = await User.findAll({
+      where: { id: { [Op.in]: userIds } },
+      attributes: ['id']
+    });
+    
+    const validUserIds = validUsers.map(user => user.id);
+    const invalidUserIds = userIds.filter(id => !validUserIds.includes(id));
+    
+    if (invalidUserIds.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Some users do not exist",
+        invalidUserIds: invalidUserIds
+      });
+    }
+
     const existingInvites = await EventInvite.findAll({
       where: {
         eventId,
-        userId: { [Op.in]: userIds },
+        userId: { [Op.in]: validUserIds },
       },
     });
-
+    
     const existingUserIds = existingInvites.map((invite) => invite.userId);
-    const newUserIds = userIds.filter((id) => !existingUserIds.includes(id));
+    const newUserIds = validUserIds.filter((id) => !existingUserIds.includes(id));
 
     if (newUserIds.length === 0) {
       return res.status(400).json({
@@ -1083,7 +1099,13 @@ const inviteUsers = async (req, res) => {
     res.json({
       success: true,
       message: `${newUserIds.length} users invited successfully`,
+      invitedUserIds: newUserIds,
+      ...(invalidUserIds.length > 0 && { 
+        warning: `${invalidUserIds.length} invalid user IDs were skipped`,
+        skippedUserIds: invalidUserIds 
+      })
     });
+
   } catch (error) {
     console.error("Invite users error:", error);
     res.status(500).json({
@@ -1093,6 +1115,7 @@ const inviteUsers = async (req, res) => {
     });
   }
 };
+
 
 const respondToInvite = async (req, res) => {
   try {
